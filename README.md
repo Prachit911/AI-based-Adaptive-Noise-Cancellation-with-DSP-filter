@@ -26,78 +26,117 @@ $env:PYTHONPATH = "$PWD\src"
 
 Run the commands below in the **same PowerShell window** so `PYTHONPATH` stays set. If PowerShell blocks virtual-environment activation, open a new terminal and use `.\.venv\Scripts\python.exe` in place of `python` in the commands below.
 
-## 2. Prepare audio files
+## 2. Quick start with synthetic audio (or prepare real datasets)
 
-For the very first run, keep it simple: record 3-5 short clean speech clips in a quiet room and 3-5 separate noise clips (fan, traffic, keyboard typing, clapping, etc.). Save them as WAV files.
+To immediately try all models without downloading large datasets, run the synthetic audio generator:
 
+```powershell
+python -m noise_suppression.generate_synthetic_samples
+```
+
+This populates `data/clean/`, `data/noise/`, `data/eval_clean/`, and `data/eval_noise/`, and creates `noisy.wav` for quick CLI testing.
+
+### Alternatively, use real recordings or public datasets:
 - Put clean speech in `data/clean/`.
 - Put environmental-noise-only recordings in `data/noise/`.
-- Put **different** clean speech recordings for final evaluation in `data/eval_clean/`.
-- Put **different** noise recordings for final evaluation in `data/eval_noise/`.
+- Put **different** clean speech recordings for evaluation in `data/eval_clean/`.
+- Put **different** noise recordings for evaluation in `data/eval_noise/`.
 
-Accepted formats are WAV, FLAC, OGG, and AIFF. Stereo is converted to mono automatically. Keep clean speech and noise as separate files; the training script creates noisy mixtures at different SNR values automatically. Do not put already-mixed speech+noise into `data/noise/`.
+For public corpora (LibriSpeech + ESC-50), run:
+```powershell
+python prepare_public_datasets_fixed.py --reset
+```
 
-For larger public datasets, these are useful starting points:
+## 3. Try individual DSP filters
 
-- [Mini LibriSpeech (clean English speech; CC BY 4.0)](https://www.openslr.org/31/). The page lists a 126 MB `dev-clean-2` archive and a 332 MB `train-clean-5` archive.
-- [ESC-50 environmental sounds](https://github.com/karolpiczak/ESC-50). It includes 5-second WAV clips and categories such as clapping and keyboard typing. The dataset is CC BY-NC, so check attribution and non-commercial restrictions before using or redistributing it.
-
-Extract selected recordings into the matching folders. For the final project, use a reasonable variety of recordings and maintain a held-out evaluation set.
-
-## 3. Try an individual DSP filter first
-
-Put a noisy recording at `noisy.wav`, then run:
+Apply any of the 12 filters in the extended filter bank on a noisy recording:
 
 ```powershell
 python -m noise_suppression.enhance --input noisy.wav --output outputs/wiener.wav --method wiener
 python -m noise_suppression.enhance --input noisy.wav --output outputs/subtraction.wav --method spectral_subtraction
 python -m noise_suppression.enhance --input noisy.wav --output outputs/bandpass.wav --method speech_bandpass
+python -m noise_suppression.enhance --input noisy.wav --output outputs/notch50.wav --method notch_50hz
+python -m noise_suppression.enhance --input noisy.wav --output outputs/log_mmse.wav --method log_mmse
+python -m noise_suppression.enhance --input noisy.wav --output outputs/declicker.wav --method median_declicker
 ```
 
-Other methods: `keep_original`, `notch_50hz`.
+**Full action list:** `keep_original`, `spectral_subtraction`, `wiener`, `wiener_mild`, `wiener_aggressive`, `speech_bandpass`, `notch_50hz`, `notch_60hz`, `highpass_80hz`, `log_mmse`, `median_declicker`, `bandpass_then_wiener`.
 
-## 4. Train the RL selector
+## 4. Train the AI selectors
 
-After adding clean and noise files, run:
+### Option A: Supervised Filter Selector (Recommended)
+
+The Supervised Selector uses 35 continuous acoustic features (MFCCs, spectral flux/flatness/entropy/centroid/rolloff, HNR, zero-crossing rate, band energies, hum power ratios) and a Gradient Boosted Decision Tree (GBRT) bank to predict the expected SI-SDR gain of every filter.
+
+```powershell
+# 1. Build zero-leakage manifest
+python -m noise_suppression.make_manifest --check-leakage
+
+# 2. Preprocess normalized audio mixtures
+python -m noise_suppression.preprocess
+
+# 3. Parallel filter sweep (full-information feedback matrix)
+python -m noise_suppression.sweep_filters --n-jobs 4
+
+# 4. Train the GBRT selector
+python -m noise_suppression.train_selector
+```
+
+Saves the trained model to `models/selector.joblib`.
+
+### Option B: Tabular Q-learning Agent (Baseline)
 
 ```powershell
 python -m noise_suppression.train_agent --episodes 2500
 ```
 
-A policy is saved to `models/q_table.json`. For a quick smoke test, use `--episodes 100`; it is not enough to claim robust performance.
+Saves the Q-table policy to `models/q_table.json`.
 
-## 5. Let RL choose the filter
+## 5. Enhance audio with automated AI selection
 
+### Using the Supervised Selector (Default):
 ```powershell
-python -m noise_suppression.enhance --input noisy.wav --output outputs/rl_enhanced.wav --method auto
+python -m noise_suppression.enhance --input noisy.wav --output outputs/enhanced_selector.wav --method selector
 ```
 
-The console prints the extracted state and chosen filter.
+### Using the Q-learning policy:
+```powershell
+python -m noise_suppression.enhance --input noisy.wav --output outputs/enhanced_rl.wav --method auto
+```
 
-## 6. Evaluate filters (held-out data)
+## 6. Comprehensive benchmark evaluation
 
-Fill `data/eval_clean/` and `data/eval_noise/` with recordings not used in training, then run:
+Run held-out evaluation across all filters, AI selectors, and the oracle upper bound:
 
 ```powershell
 python -m noise_suppression.evaluate --n 30
 ```
 
-Results are saved to `outputs/evaluation.csv` with the SI-SDR improvement for each method. Higher SI-SDR improvement is generally better, but listening is still necessary; no single metric fully describes perceived quality.
+Outputs:
+- `outputs/evaluation.csv` & `outputs/evaluation_results.csv`: per-sample metrics.
+- `outputs/evaluation_summary.csv`: aggregated results with 95% bootstrap confidence intervals.
+- `outputs/evaluation_report.md`: formatted Markdown report with SNR and noise category breakdowns.
 
-## 7. Optional web interface
+Metrics computed:
+- **SI-SDR improvement (dB)**
+- **STOI improvement**
+- **PESQ-WB improvement** (if `pesq` is installed)
+- **95% bootstrap confidence intervals**
+
+## 7. Interactive web interface
+
+Launch the Gradio web dashboard:
 
 ```powershell
-pip install gradio
-$env:PYTHONPATH = "$PWD\src"
 python -m noise_suppression.app
 ```
 
-Open the local URL printed in the terminal.
+Open the local URL displayed in the terminal to upload noisy clips, select enhancement methods, inspect predicted filter gains, and listen to before-and-after audio side by side.
 
-## Initial limitations to state honestly in the report
+## 8. Running test suite
 
-- The noise profile is estimated from quiet frames and can be wrong when speech/noise overlap strongly.
-- A fixed speech bandpass and fixed 50 Hz notches only help for some noise types; they are not universal denoisers.
-- The reward is based on SI-SDR improvement against a clean reference during training. At inference time, the clean reference is not needed.
-- A whole-clip filter choice is a starting point. Frame-wise policy switching can be investigated later if time permits.
-- The RL selector is only as good as the acoustic states, training samples, filters, and reward. Compare it against each individual filter on held-out audio before claiming it improves performance.
+Run all 37 unit and integration tests:
+
+```powershell
+pytest
+```
