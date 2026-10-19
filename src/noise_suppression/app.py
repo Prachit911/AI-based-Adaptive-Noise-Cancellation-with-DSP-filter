@@ -14,8 +14,10 @@ from .features import extract_features, extract_state
 from .filters import ACTIONS, apply_filter
 from .selector import SupervisedFilterSelector
 
-SELECTOR_PATH = Path("models/selector.joblib")
-Q_PATH = Path("models/q_table.json")
+# Resolve models relative to project root so the app works from any cwd.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SELECTOR_PATH = _PROJECT_ROOT / "models" / "selector.joblib"
+Q_PATH = _PROJECT_ROOT / "models" / "q_table.json"
 
 
 def process_audio(filepath: str | None, method: str):
